@@ -14,6 +14,86 @@ const SPAM_TRIGGERS = {
   low: ['reminder', 'help', 'percent off', '% off', 'sale', 'save', 'deal', 'offer', 'clearance', 'discount', 'compare', 'opportunity', 'solution', 'introducing', 'announcing', 'new', 'improved', 'revolutionary']
 }
 
+const FLAGGED_CONTENT = {
+  profanity: [
+    'fuck', 'fucker', 'fucking', 'fucked', 'fucks', 'motherfucker',
+    'shit', 'shitty', 'bullshit', 'horseshit',
+    'ass', 'asshole', 'dumbass', 'badass', 'jackass',
+    'bitch', 'bitches', 'bitchy',
+    'damn', 'goddamn', 'dammit',
+    'crap', 'crappy',
+    'what the hell', 'go to hell',
+    'dick', 'dickhead',
+    'piss', 'pissed', 'pissing',
+    'bastard', 'bastards',
+    'cunt', 'twat',
+    'wtf', 'stfu', 'lmfao',
+  ],
+  scam: [
+    'verify your account', 'confirm your identity', 'confirm your account',
+    'account suspended', 'account has been', 'account will be closed',
+    'unauthorized access', 'unauthorized transaction', 'suspicious activity',
+    'update your payment', 'update your billing', 'verify your payment',
+    'wire transfer', 'bank account details', 'send money',
+    'inheritance', 'nigerian prince', 'beneficiary',
+    'guaranteed income', 'get rich quick', 'get rich fast',
+    'no experience needed', 'no experience required',
+    'social security number', 'ssn', 'credit card number',
+    'password reset', 'reset your password', 'login credentials',
+    'irs refund', 'tax refund', 'claim your refund',
+    'your package', 'delivery failed', 'shipment on hold',
+    'invoice attached', 'payment overdue', 'outstanding payment',
+    'you owe', 'pay immediately', 'legal action',
+    'final warning', 'account locked', 'security alert',
+    'click to verify', 'verify now', 'confirm now',
+    'cryptocurrency', 'bitcoin profit', 'crypto investment',
+  ],
+  deceptive: [
+    'your account is at risk', 'immediate action required',
+    'you\'ve been chosen', 'specially selected',
+    'act before it\'s too late', 'expiring immediately',
+    'this is not a scam', 'this is legitimate', 'this is real',
+    'secret method', 'they don\'t want you to know',
+    'one weird trick', 'doctors hate',
+    'government grant', 'free government money',
+    'lose weight fast', 'lose pounds', 'burn fat',
+    'enlarge', 'enhancement', 'male enhancement',
+    'nigerian', 'foreign lottery', 'international lottery',
+    'dear customer', 'dear user', 'dear valued',
+    'from the desk of', 'confidential',
+  ]
+}
+
+function checkFlaggedContent(lower, words) {
+  const found = { profanity: [], scam: [], deceptive: [] }
+  for (const [category, phrases] of Object.entries(FLAGGED_CONTENT)) {
+    for (const phrase of phrases) {
+      if (phrase.includes(' ')) {
+        if (lower.includes(phrase)) found[category].push(phrase)
+      } else {
+        const regex = new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+        if (regex.test(lower)) found[category].push(phrase)
+      }
+    }
+  }
+  const hasProfanity = found.profanity.length > 0
+  const hasScam = found.scam.length > 0
+  const hasDeceptive = found.deceptive.length > 0
+  const totalFlags = found.profanity.length + found.scam.length + found.deceptive.length
+
+  let score = 100
+  if (hasProfanity) score -= found.profanity.length * 30
+  if (hasScam) score -= found.scam.length * 40
+  if (hasDeceptive) score -= found.deceptive.length * 25
+  score = Math.max(0, score)
+
+  // Hard cap: if any scam or profanity detected, score can't exceed 15
+  if (hasScam || hasProfanity) score = Math.min(score, 15)
+  else if (hasDeceptive) score = Math.min(score, 30)
+
+  return { score, found, hasProfanity, hasScam, hasDeceptive, totalFlags }
+}
+
 function analyzeSubjectLine(subject) {
   if (!subject.trim()) return null
   const lower = subject.toLowerCase()
@@ -91,8 +171,11 @@ function analyzeSubjectLine(subject) {
   if (specialChars > 3) readabilityScore -= 15
   readabilityScore = Math.max(0, readabilityScore)
 
+  // Content quality (profanity, scam, deceptive)
+  const contentQuality = checkFlaggedContent(lower, words)
+
   // Overall score
-  const overall = Math.round(
+  let overall = Math.round(
     lengthScore * 0.20 +
     powerScore * 0.15 +
     spamScore * 0.25 +
@@ -101,6 +184,13 @@ function analyzeSubjectLine(subject) {
     emojiScore * 0.05 +
     readabilityScore * 0.10
   )
+
+  // Hard cap: flagged content overrides the overall score
+  if (contentQuality.hasScam || contentQuality.hasProfanity) {
+    overall = Math.min(overall, 20)
+  } else if (contentQuality.hasDeceptive) {
+    overall = Math.min(overall, 35)
+  }
 
   return {
     overall,
@@ -113,7 +203,8 @@ function analyzeSubjectLine(subject) {
       personalization: { score: personalizationScore, hasMergeTag, hasQuestion, hasNumber, hasYouYour },
       urgency: { score: urgencyScore, words: urgencyWords },
       emoji: { score: emojiScore, count: emojiCount },
-      readability: { score: readabilityScore, isAllCaps, capsWords, excessivePunctuation }
+      readability: { score: readabilityScore, isAllCaps, capsWords, excessivePunctuation },
+      contentQuality
     }
   }
 }
@@ -181,6 +272,10 @@ function CategoryCard({ title, icon, score, children }) {
 function getTips(result) {
   const tips = []
   const c = result.categories
+  // Content quality tips first — these are highest priority
+  if (c.contentQuality.hasScam) tips.push({ icon: '🛑', title: 'Remove scam language', text: `Phishing/scam language detected: "${c.contentQuality.found.scam.slice(0, 2).join('", "')}". This will get your email blocked by every major provider and may violate CAN-SPAM or GDPR regulations.` })
+  if (c.contentQuality.hasProfanity) tips.push({ icon: '🛑', title: 'Remove profanity', text: `Profanity detected: "${c.contentQuality.found.profanity.slice(0, 2).join('", "')}". This triggers aggressive spam filters, damages brand trust, and will tank your deliverability.` })
+  if (c.contentQuality.hasDeceptive) tips.push({ icon: '⚠️', title: 'Rewrite deceptive language', text: `Deceptive tactics detected: "${c.contentQuality.found.deceptive.slice(0, 2).join('", "')}". Replace with honest, value-driven language that builds subscriber trust.` })
   if (c.length.score < 70) tips.push({ icon: '📏', title: 'Optimize length', text: `Your subject line is ${result.charCount} characters. Aim for 30–60 characters for the best open rates across all devices.` })
   if (c.spam.found.high.length > 0) tips.push({ icon: '🚫', title: 'Remove spam triggers', text: `High-risk spam words detected: "${c.spam.found.high.slice(0, 3).join('", "')}". Remove or rephrase these to avoid spam filters.` })
   if (c.personalization.score < 60) tips.push({ icon: '👤', title: 'Add personalization', text: 'Include the recipient\'s name with a merge tag, ask a question, or use "you/your" to make it feel personal.' })
@@ -208,12 +303,35 @@ export default function App() {
       <div className="space-y-4">
         {label && <h3 className="text-lg font-bold text-white">{label}</h3>}
 
+        {/* Content quality warning banner */}
+        {(c.contentQuality.hasProfanity || c.contentQuality.hasScam || c.contentQuality.hasDeceptive) && (
+          <div className={`border rounded-2xl p-4 ${c.contentQuality.hasScam || c.contentQuality.hasProfanity ? 'border-coral/40 bg-coral/10' : 'border-tangerine/40 bg-tangerine/10'}`}>
+            <div className="flex items-start gap-3">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={`w-6 h-6 shrink-0 mt-0.5 ${c.contentQuality.hasScam || c.contentQuality.hasProfanity ? 'text-coral' : 'text-tangerine'}`}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m0-10.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.75c0 5.592 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.25-8.25-3.286Zm0 13.036h.008v.008H12v-.008Z" /></svg>
+              <div>
+                <p className={`font-semibold ${c.contentQuality.hasScam || c.contentQuality.hasProfanity ? 'text-coral' : 'text-tangerine'}`}>
+                  {c.contentQuality.hasScam ? 'Scam / Phishing Language Detected' : c.contentQuality.hasProfanity ? 'Profanity Detected' : 'Deceptive Language Detected'}
+                </p>
+                <p className="text-sm text-cloudy mt-1">
+                  {c.contentQuality.hasScam
+                    ? 'This subject line contains language commonly associated with phishing or scam emails. Email providers will almost certainly block it, and it may violate anti-spam laws (CAN-SPAM, GDPR).'
+                    : c.contentQuality.hasProfanity
+                    ? 'Profanity in subject lines triggers aggressive spam filtering and damages brand trust. Most email providers will flag or block this.'
+                    : 'This subject line uses deceptive tactics that erode trust and trigger spam filters. Rewrite with honest, value-driven language.'}
+                </p>
+                <p className="text-xs text-galactic mt-2">Overall score capped due to flagged content.</p>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="card-gradient border border-metal/20 rounded-2xl p-6 flex flex-col sm:flex-row items-center gap-6">
           <ScoreCircle score={result.overall} />
           <div>
             <div className={`text-2xl font-bold ${getScoreColor(result.overall)}`}>{getVerdict(result.overall)}</div>
             <p className="text-cloudy mt-1">{result.charCount} characters &middot; {result.wordCount} words</p>
-            {result.overall < 60 && <p className="text-galactic text-sm mt-2">Focus on the lowest-scoring categories below for the biggest improvement.</p>}
+            {result.overall < 60 && !c.contentQuality.totalFlags && <p className="text-galactic text-sm mt-2">Focus on the lowest-scoring categories below for the biggest improvement.</p>}
+            {c.contentQuality.totalFlags > 0 && <p className="text-coral text-sm mt-2">Remove flagged content before optimizing other categories.</p>}
           </div>
         </div>
 
@@ -287,6 +405,41 @@ export default function App() {
             )}
           </div>
         </CategoryCard>
+
+        {/* Content Quality — only show if flags found */}
+        {c.contentQuality.totalFlags > 0 && (
+          <CategoryCard title="Content Quality" score={c.contentQuality.score} icon={<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.249-8.25-3.285Z" /></svg>}>
+            <div className="mt-3 space-y-3">
+              {c.contentQuality.found.profanity.length > 0 && (
+                <div>
+                  <p className="text-sm font-medium text-coral mb-1">Profanity</p>
+                  <div className="flex flex-wrap gap-1">
+                    {c.contentQuality.found.profanity.map((w, i) => <span key={i} className="bg-coral/10 border border-coral/20 text-coral rounded px-2 py-0.5 text-xs">{w}</span>)}
+                  </div>
+                  <p className="text-xs text-galactic mt-1">Profanity triggers aggressive spam filtering and damages sender reputation.</p>
+                </div>
+              )}
+              {c.contentQuality.found.scam.length > 0 && (
+                <div>
+                  <p className="text-sm font-medium text-coral mb-1">Scam / Phishing Language</p>
+                  <div className="flex flex-wrap gap-1">
+                    {c.contentQuality.found.scam.map((w, i) => <span key={i} className="bg-coral/10 border border-coral/20 text-coral rounded px-2 py-0.5 text-xs">{w}</span>)}
+                  </div>
+                  <p className="text-xs text-galactic mt-1">These phrases are commonly used in phishing and scam emails. ESPs will block delivery.</p>
+                </div>
+              )}
+              {c.contentQuality.found.deceptive.length > 0 && (
+                <div>
+                  <p className="text-sm font-medium text-tangerine mb-1">Deceptive Tactics</p>
+                  <div className="flex flex-wrap gap-1">
+                    {c.contentQuality.found.deceptive.map((w, i) => <span key={i} className="bg-tangerine/10 border border-tangerine/20 text-tangerine rounded px-2 py-0.5 text-xs">{w}</span>)}
+                  </div>
+                  <p className="text-xs text-galactic mt-1">Deceptive language erodes subscriber trust and increases spam complaints.</p>
+                </div>
+              )}
+            </div>
+          </CategoryCard>
+        )}
 
         <CategoryCard title="Personalization" score={c.personalization.score} icon={<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" /></svg>}>
           <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
